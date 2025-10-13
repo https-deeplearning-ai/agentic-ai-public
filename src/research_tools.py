@@ -1,43 +1,21 @@
-from typing import List, Dict
-import requests
-import xml.etree.ElementTree as ET
-from typing import List, Dict, Optional
-import os, re, tempfile
-import requests
-from pdfminer.high_level import extract_text
-
-session = requests.Session()
-session.headers.update(
-    {"User-Agent": "LF-ADP-Agent/1.0 (mailto:your.email@example.com)"}
-)
-
-## -----
-
-from typing import List, Dict, Optional
-import os, re, time, tempfile
-import requests
-import xml.etree.ElementTree as ET
-
-# ----- Session with retries & headers -----
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-from typing import List, Dict, Optional
-import os, re, time
-import requests
+# Standard library imports
+import os
+import re
+import time
 import xml.etree.ElementTree as ET
 from io import BytesIO
-
-
 from typing import List, Dict, Optional
-import os, re, time
-import requests
-import xml.etree.ElementTree as ET
-from io import BytesIO
 
-# ----- Session with retries & headers -----
+# Third-party imports
+import requests
+import wikipedia
+from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
+from tavily import TavilyClient
 from urllib3.util.retry import Retry
+
+# Load environment variables
+load_dotenv()
 
 
 def _build_session(
@@ -83,8 +61,6 @@ def ensure_pdf_url(abs_or_pdf_url: str) -> str:
 
 
 def _safe_filename(name: str) -> str:
-    import re
-
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
@@ -141,12 +117,6 @@ def maybe_save_pdf(pdf_bytes: bytes, dest_dir: str, filename: str) -> str:
 
 
 # ----- arXiv search -----
-from typing import List, Dict
-import time, requests, xml.etree.ElementTree as ET
-from io import BytesIO
-
-# session = _build_session()
-# ensure_pdf_url(), clean_text(), fetch_pdf_bytes(), pdf_bytes_to_text(), maybe_save_pdf()
 
 
 def arxiv_search_tool(
@@ -264,14 +234,7 @@ arxiv_tool_def = {
 }
 
 
-## -----
-
-
-import os
-from dotenv import load_dotenv
-from tavily import TavilyClient
-
-load_dotenv()  # Loads environment variables from a .env file
+# ----- Tavily search (Web search) -----
 
 
 def tavily_search_tool(
@@ -347,10 +310,8 @@ tavily_tool_def = {
     },
 }
 
-## Wikipedia search tool
 
-from typing import List, Dict
-import wikipedia
+# ----- Wikipedia search -----
 
 
 def wikipedia_search_tool(query: str, sentences: int = 5) -> List[Dict]:
