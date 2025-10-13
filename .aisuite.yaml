@@ -1,0 +1,4 @@
+providers:
+  ollama:
+    api_url: ${OLLAMA_API_URL}
+    timeout: 600  # Allow up to 10 minutes per request for slower local models

@@ -118,6 +118,32 @@ function disableUI(disabled){
   if (input) input.disabled = disabled;
 }
 
+function formatDurationLabel(step) {
+  const raw = Number(step?.duration_seconds);
+  if (!Number.isFinite(raw) || raw < 0) return null;
+
+  const totalSeconds = raw;
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  const parts = [];
+  if (hours) parts.push(`${hours}h`);
+  if (hours || minutes) parts.push(`${minutes}m`);
+
+  let secondsStr = seconds.toFixed(2);
+  secondsStr = secondsStr.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+  parts.push(`${secondsStr}s`);
+
+  return parts.join(" ");
+}
+
+function buildStatusLabel(step) {
+  const status = step.status ? step.status.toUpperCase() : "";
+  const duration = formatDurationLabel(step);
+  return duration ? `${status} — Time Elapsed ${duration}` : status;
+}
+
 function submitPrompt() {
   const prompt = document.getElementById('promptInput').value;
   if (!prompt) return;
@@ -163,7 +189,8 @@ function fetchProgress() {
       }
 
       steps.forEach((step, index) => {
-        const stepKey = `${step.title}-${step.status}-${step.substeps.length}`;
+        const durationKey = typeof step.duration_seconds === 'number' ? step.duration_seconds : 'na';
+        const stepKey = `${step.title}-${step.status}-${step.substeps.length}-${durationKey}`;
         if (renderedSteps.get(index) === stepKey) return;
 
         renderedSteps.set(index, stepKey);
@@ -171,6 +198,8 @@ function fetchProgress() {
         const icon = step.status === 'done' ? '✅' :
                      step.status === 'running' ? '<span class="spinner-border spinner-border-sm text-warning"></span>' :
                      step.status === 'error' ? '❌' : '🕓';
+        const statusLabel = buildStatusLabel(step);
+        const headerText = statusLabel ? `${step.title} — ${statusLabel}` : step.title;
 
         const rowId = `step-row-${index}`;
         let row = document.getElementById(rowId);
@@ -203,7 +232,7 @@ function fetchProgress() {
           card.id = cardId;
           card.className = `card mb-3 ${getStepClass(step.status)}`;
           card.innerHTML = `
-            <div class="card-header">${step.title} — ${step.status.toUpperCase()}</div>
+            <div class="card-header">${headerText}</div>
             <div class="card-body">
               <p>${step.description}</p>
               ${substepsHTML}
@@ -212,7 +241,7 @@ function fetchProgress() {
           document.getElementById('stepDetails').appendChild(card);
         } else {
           card.className = `card mb-3 ${getStepClass(step.status)}`;
-          card.querySelector('.card-header').textContent = `${step.title} — ${step.status.toUpperCase()}`;
+          card.querySelector('.card-header').textContent = headerText;
           card.querySelector('.card-body').innerHTML = `
             <p>${step.description}</p>
             ${substepsHTML}

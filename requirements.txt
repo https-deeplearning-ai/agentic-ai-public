@@ -10,6 +10,7 @@ wikipedia
 requests
 aisuite
 docstring_parser
+PyYAML
 
 # Core
 pdfminer.six

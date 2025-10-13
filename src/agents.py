@@ -1,18 +1,35 @@
 from datetime import datetime
 from urllib import response
-from aisuite import Client
+from typing import Optional
+import os
 from src.research_tools import (
     arxiv_search_tool,
     tavily_search_tool,
     wikipedia_search_tool,
 )
+from src.llm_client import get_aisuite_client
 
-client = Client()
+"""LLM configuration shims
+
+We prefer generic envs (LLM_PROVIDER, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL).
+Many OpenAI-compatible clients rely on OPENAI_* variables. Normalize here
+before initializing the client so downstream code keeps working unchanged.
+"""
+
+# Normalize generic envs to OpenAI-compatible envs (without overriding if already set)
+if os.getenv("LLM_BASE_URL") and not os.getenv("OPENAI_BASE_URL"):
+    os.environ["OPENAI_BASE_URL"] = os.getenv("LLM_BASE_URL", "")
+if os.getenv("LLM_API_KEY") and not os.getenv("OPENAI_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = os.getenv("LLM_API_KEY", "")
+
+DEFAULT_MODEL = os.getenv("LLM_MODEL", "openai:gpt-4.1-mini")
+
+client = get_aisuite_client()
 
 
 # === Research Agent ===
 def research_agent(
-    prompt: str, model: str = "openai:gpt-4.1-mini", return_messages: bool = False
+    prompt: str, model: Optional[str] = None, return_messages: bool = False
 ):
     print("==================================")
     print("🔍 Research Agent")
@@ -81,7 +98,7 @@ USER RESEARCH REQUEST:
 
     try:
         resp = client.chat.completions.create(
-            model=model,
+            model=model or DEFAULT_MODEL,
             messages=messages,
             tools=tools,
             tool_choice="auto",
@@ -154,7 +171,7 @@ USER RESEARCH REQUEST:
 
 def writer_agent(
     prompt: str,
-    model: str = "openai:gpt-4.1-mini",
+    model: Optional[str] = None,
     min_words_total: int = 2400,
     min_words_per_section: int = 400,
     max_tokens: int = 15000,
@@ -227,7 +244,7 @@ INTERNAL CHECKLIST (DO NOT INCLUDE IN OUTPUT):
 
     def _call(messages_):
         resp = client.chat.completions.create(
-            model=model,
+            model=model or DEFAULT_MODEL,
             messages=messages_,
             temperature=0,
             max_tokens=max_tokens,
@@ -248,7 +265,7 @@ INTERNAL CHECKLIST (DO NOT INCLUDE IN OUTPUT):
 
 def editor_agent(
     prompt: str,
-    model: str = "openai:gpt-4.1-mini",
+    model: Optional[str] = None,
     target_min_words: int = 2400,
 ):
     print("==================================")
@@ -288,7 +305,7 @@ Return only the revised, polished text in Markdown format without explanatory co
     ]
 
     response = client.chat.completions.create(
-        model=model, messages=messages, temperature=0
+        model=model or DEFAULT_MODEL, messages=messages, temperature=0
     )
 
     content = response.choices[0].message.content

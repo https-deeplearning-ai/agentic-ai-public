@@ -1,15 +1,32 @@
 import json
 import re
-from typing import List
+import textwrap
+from typing import List, Optional, Dict, Any
 from datetime import datetime
-from aisuite import Client
+import os
 from src.agents import (
     research_agent,
     writer_agent,
     editor_agent,
 )
+from src.llm_client import get_aisuite_client
+from src.research_tools import tavily_search_tool, arxiv_search_tool
 
-client = Client()
+"""LLM configuration shims for OpenAI-compatible servers.
+
+Prefer generic envs (LLM_PROVIDER, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL).
+Normalize to OPENAI_* for clients that expect those names, then init Client.
+"""
+if os.getenv("LLM_BASE_URL") and not os.getenv("OPENAI_BASE_URL"):
+    os.environ["OPENAI_BASE_URL"] = os.getenv("LLM_BASE_URL", "")
+if os.getenv("LLM_API_KEY") and not os.getenv("OPENAI_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = os.getenv("LLM_API_KEY", "")
+
+DEFAULT_MODEL = os.getenv("LLM_MODEL", "openai:gpt-4.1-mini")
+
+client = get_aisuite_client()
+
+TOOLLESS_PROVIDERS = {"ollama"}
 
 
 def clean_json_block(raw: str) -> str:
@@ -24,7 +41,7 @@ from typing import List
 import json, ast
 
 
-def planner_agent(topic: str, model: str = "openai:o4-mini") -> List[str]:
+def planner_agent(topic: str, model: Optional[str] = None) -> List[str]:
     prompt = f"""
 You are a planning agent responsible for organizing a research workflow using multiple intelligent agents.
 
@@ -56,7 +73,7 @@ Topic: "{topic}"
 """
 
     response = client.chat.completions.create(
-        model=model,
+        model=model or DEFAULT_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=1,
     )
@@ -133,7 +150,256 @@ Topic: "{topic}"
     return steps
 
 
-def executor_agent_step(step_title: str, history: list, prompt: str):
+def _provider_from_model(model_name: str) -> str:
+    if not model_name:
+        return ""
+    if ":" in model_name:
+        return model_name.split(":", 1)[0]
+    return model_name
+
+
+def _supports_tool_invocation(model_name: str) -> bool:
+    provider = _provider_from_model(model_name)
+    return provider not in TOOLLESS_PROVIDERS
+
+
+def _format_tool_usage(entries: List[str]) -> str:
+    if not entries:
+        return ""
+
+    unique = []
+    for entry in entries:
+        if entry not in unique:
+            unique.append(entry)
+
+    formatted = "\n".join(f"- {item}" for item in unique)
+    return f"\n\n📎 Tools used\n{formatted}"
+
+
+def _generate_search_query(model_name: str, user_prompt: str) -> str:
+    instructions = (
+        "You craft concise web search queries. Respond with a single query string "
+        "(no bullet points) that would retrieve authoritative and timely sources."
+    )
+    messages = [
+        {"role": "system", "content": instructions},
+        {
+            "role": "user",
+            "content": textwrap.dedent(
+                f"""
+                User research question:
+                {user_prompt.strip()}
+                """
+            ).strip(),
+        },
+    ]
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=0.1,
+            max_tokens=48,
+        )
+        query = (resp.choices[0].message.content or "").strip()
+        query = query.splitlines()[0].strip().strip('"')
+        return query or user_prompt.strip()[:120]
+    except Exception:
+        fallback = user_prompt.strip()[:120]
+        return fallback or "latest research developments"
+
+
+def _run_tavily_fallback(
+    user_prompt: str, model_name: str, shared_state: Dict[str, Any]
+) -> str:
+    query = _generate_search_query(model_name, user_prompt)
+    try:
+        results = tavily_search_tool(query=query, max_results=5)
+    except Exception as exc:
+        results = [{"error": f"Tavily call failed: {exc}"}]
+
+    shared_state["tavily_seed_results"] = {
+        "query": query,
+        "results": results,
+    }
+
+    valid_results = [r for r in results if isinstance(r, dict) and not r.get("error")]
+    errors = [r.get("error") for r in results if isinstance(r, dict) and r.get("error")]
+
+    lines: List[str] = []
+    lines.append("1. Summary of Research Approach:")
+    lines.append(f"- Executed Tavily web search with query: {query}.")
+    if valid_results:
+        lines.append("- Collected the top relevant items with metadata for follow-up analysis.")
+    lines.append("")
+
+    lines.append("Key Findings:")
+    if valid_results:
+        for idx, item in enumerate(valid_results, start=1):
+            bullet = chr(ord("A") + (idx - 1) % 26)
+            title = item.get("title") or "(No title provided)"
+            lines.append(f"{bullet}. {title}")
+            snippet = (item.get("content") or "").strip()
+            if snippet:
+                lines.append(
+                    textwrap.fill(
+                        snippet,
+                        width=96,
+                        initial_indent="   ",
+                        subsequent_indent="   ",
+                    )
+                )
+            url = item.get("url")
+            if url:
+                lines.append(f"   URL: {url}")
+    else:
+        lines.append("- Tavily did not return any successful results for the generated query.")
+
+    if errors:
+        lines.append("")
+        lines.append("Errors Encountered:")
+        for err in errors:
+            lines.append(f"- {err}")
+
+    lines.append("")
+    lines.append("Source Details:")
+    if valid_results:
+        for item in valid_results:
+            title = item.get("title") or "(No title provided)"
+            url = item.get("url") or "N/A"
+            lines.append(f"- {title} — {url}")
+    else:
+        lines.append("- No source metadata available.")
+
+    lines.append("")
+    lines.append("Limitations:")
+    lines.append("- Web snippets may omit deeper context or reference paywalled material.")
+    lines.append("- Forecasts and claims about AGI vary widely across sources.")
+
+    body = "\n".join(lines)
+    body += _format_tool_usage(
+        [f"tavily_search_tool(query={query!r}, max_results=5)"]
+    )
+    return body
+
+
+def _run_arxiv_fallback(
+    shared_state: Dict[str, Any],
+) -> str:
+    tavily_state = shared_state.get("tavily_seed_results") or {}
+    tavily_results = tavily_state.get("results") or []
+    query_used = tavily_state.get("query") or "<unknown>"
+
+    valid_items = [
+        item for item in tavily_results if isinstance(item, dict) and not item.get("error")
+    ]
+    if not valid_items:
+        return (
+            "No Tavily results are cached for arXiv cross-referencing. "
+            "Re-run the Tavily step before executing the arXiv lookup."
+        )
+
+    matches: List[Dict[str, Any]] = []
+    no_matches: List[str] = []
+    errors: List[str] = []
+    queries_run: List[str] = []
+
+    for item in valid_items:
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+
+        queries_run.append(title)
+        try:
+            hits = arxiv_search_tool(query=title, max_results=2)
+        except Exception as exc:
+            errors.append(f"{title}: {exc}")
+            continue
+
+        found_any = False
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            if hit.get("error"):
+                errors.append(f"{title}: {hit['error']}")
+                continue
+
+            found_any = True
+            matches.append(
+                {
+                    "query": title,
+                    "title": hit.get("title"),
+                    "url": hit.get("url"),
+                    "link_pdf": hit.get("link_pdf"),
+                    "authors": ", ".join(hit.get("authors", [])),
+                    "published": hit.get("published"),
+                }
+            )
+
+        if not found_any:
+            no_matches.append(title)
+
+    shared_state["arxiv_results"] = matches
+
+    lines: List[str] = []
+    lines.append("1. Summary of Research Approach:")
+    lines.append(
+        f"- Reviewed Tavily findings generated with query: {query_used}."
+    )
+    lines.append("- Queried arXiv for matching preprints (up to 2 per candidate title).")
+    lines.append("")
+
+    lines.append("Matches Found:")
+    if matches:
+        for idx, hit in enumerate(matches, start=1):
+            title = hit.get("title") or "(Untitled)"
+            lines.append(f"{idx}. {title}")
+            meta_bits = []
+            if hit.get("authors"):
+                meta_bits.append(hit["authors"])
+            if hit.get("published"):
+                meta_bits.append(hit["published"])
+            if meta_bits:
+                lines.append(f"   {', '.join(meta_bits)}")
+            if hit.get("url"):
+                lines.append(f"   Abs: {hit['url']}")
+            if hit.get("link_pdf"):
+                lines.append(f"   PDF: {hit['link_pdf']}")
+    else:
+        lines.append("- No arXiv entries matched the Tavily candidates.")
+
+    if no_matches:
+        lines.append("")
+        lines.append("Items Without arXiv Matches:")
+        for title in no_matches:
+            lines.append(f"- {title}")
+
+    if errors:
+        lines.append("")
+        lines.append("Errors Encountered:")
+        for err in errors:
+            lines.append(f"- {err}")
+
+    lines.append("")
+    lines.append("Limitations:")
+    lines.append("- arXiv covers scientific domains; industry or non-academic sources may be absent.")
+    lines.append("- Matching relies on title similarity and may miss alternate phrasing or author listings.")
+
+    body = "\n".join(lines)
+    tool_entries = [
+        f"arxiv_search_tool(query={query!r}, max_results=2)" for query in queries_run
+    ]
+    body += _format_tool_usage(tool_entries)
+    return body
+
+
+def executor_agent_step(
+    step_title: str,
+    history: list,
+    prompt: str,
+    model: Optional[str] = None,
+    shared_state: Optional[Dict[str, Any]] = None,
+):
     """
     Executes a step of the executor agent.
     Returns:
@@ -141,6 +407,12 @@ def executor_agent_step(step_title: str, history: list, prompt: str):
         - agent_name (str)
         - output (str)
     """
+
+    if shared_state is None:
+        shared_state = {}
+
+    model_name = model or DEFAULT_MODEL
+    supports_tools = _supports_tool_invocation(model_name)
 
     # Construir contexto enriquecido estructurado
     context = f"📘 User Prompt:\n{prompt}\n\n📜 History so far:\n"
@@ -163,14 +435,23 @@ def executor_agent_step(step_title: str, history: list, prompt: str):
     # Seleccionar agente basado en el paso
     step_lower = step_title.lower()
     if "research" in step_lower:
-        content, _ = research_agent(prompt=enriched_task)
+        if not supports_tools and "use tavily" in step_lower:
+            content = _run_tavily_fallback(prompt, model_name, shared_state)
+            print("🔍 Research Agent (fallback Tavily) Output:", content)
+            return step_title, "research_agent", content
+        if not supports_tools and "arxiv" in step_lower:
+            content = _run_arxiv_fallback(shared_state)
+            print("🔍 Research Agent (fallback arXiv) Output:", content)
+            return step_title, "research_agent", content
+
+        content, _ = research_agent(prompt=enriched_task, model=model)
         print("🔍 Research Agent Output:", content)
         return step_title, "research_agent", content
     elif "draft" in step_lower or "write" in step_lower:
-        content, _ = writer_agent(prompt=enriched_task)
+        content, _ = writer_agent(prompt=enriched_task, model=model)
         return step_title, "writer_agent", content
     elif "revise" in step_lower or "edit" in step_lower or "feedback" in step_lower:
-        content, _ = editor_agent(prompt=enriched_task)
+        content, _ = editor_agent(prompt=enriched_task, model=model)
         return step_title, "editor_agent", content
     else:
         raise ValueError(f"Unknown step type: {step_title}")

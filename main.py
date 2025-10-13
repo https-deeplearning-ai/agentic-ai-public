@@ -2,7 +2,8 @@ import os
 import uuid
 import json
 import threading
-from datetime import datetime
+from time import perf_counter
+from datetime import datetime, timedelta
 from typing import Optional, Literal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -69,6 +70,7 @@ task_progress = {}
 
 class PromptRequest(BaseModel):
     prompt: str
+    model: Optional[str] = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -90,7 +92,7 @@ def generate_report(req: PromptRequest):
     db.close()
 
     task_progress[task_id] = {"steps": []}
-    initial_plan_steps = planner_agent(req.prompt)
+    initial_plan_steps = planner_agent(req.prompt, model=req.model)
     for step_title in initial_plan_steps:
         task_progress[task_id]["steps"].append(
             {
@@ -102,7 +104,7 @@ def generate_report(req: PromptRequest):
         )
 
     thread = threading.Thread(
-        target=run_agent_workflow, args=(task_id, req.prompt, initial_plan_steps)
+        target=run_agent_workflow, args=(task_id, req.prompt, initial_plan_steps, req.model)
     )
     thread.start()
     return {"task_id": task_id}
@@ -132,11 +134,13 @@ def format_history(history):
     )
 
 
-def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
+def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list, model: Optional[str] = None):
     steps_data = task_progress[task_id]["steps"]
     execution_history = []
+    step_start_times: dict[int, float] = {}
+    shared_state: dict = {}
 
-    def update_step_status(index, status, description="", substep=None):
+    def update_step_status(index, status, description="", substep=None, started_at=None, duration=None):
         if index < len(steps_data):
             steps_data[index]["status"] = status
             if description:
@@ -144,13 +148,29 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
             if substep:
                 steps_data[index]["substeps"].append(substep)
             steps_data[index]["updated_at"] = datetime.utcnow().isoformat()
+            if started_at:
+                steps_data[index]["started_at"] = started_at
+            if duration is not None:
+                steps_data[index]["duration_seconds"] = round(duration, 2)
+                steps_data[index]["duration_human"] = str(timedelta(seconds=round(duration)))
 
     try:
         for i, plan_step_title in enumerate(initial_plan_steps):
-            update_step_status(i, "running", f"Executing: {plan_step_title}")
+            step_start_times[i] = perf_counter()
+            started_at_iso = datetime.utcnow().isoformat()
+            update_step_status(
+                i,
+                "running",
+                f"Executing: {plan_step_title}",
+                started_at=started_at_iso,
+            )
 
             actual_step_description, agent_name, output = executor_agent_step(
-                plan_step_title, execution_history, prompt
+                plan_step_title,
+                execution_history,
+                prompt,
+                model=model,
+                shared_state=shared_state,
             )
 
             execution_history.append([plan_step_title, actual_step_description, output])
@@ -162,6 +182,9 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
                 return esc(s).replace("\n", "<br>")
 
             # ...
+            start_ts = step_start_times.pop(i, None)
+            elapsed = perf_counter() - start_ts if start_ts is not None else 0.0
+
             update_step_status(
                 i,
                 "done",
@@ -189,6 +212,7 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
 </div>
 """.strip(),
                 },
+                duration=elapsed,
             )
 
         final_report_markdown = (
@@ -213,11 +237,14 @@ def run_agent_workflow(task_id: str, prompt: str, initial_plan_steps: list):
                 len(steps_data) - 1,
             )
             if error_step_index >= 0:
+                start_ts = step_start_times.pop(error_step_index, None)
+                elapsed = perf_counter() - start_ts if start_ts is not None else 0.0
                 update_step_status(
                     error_step_index,
                     "error",
                     f"Error during execution: {e}",
                     {"title": "Error", "content": str(e)},
+                    duration=elapsed,
                 )
 
         db = SessionLocal()
