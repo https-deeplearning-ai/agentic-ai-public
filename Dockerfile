@@ -16,6 +16,9 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install -r requirements.txt
 COPY . /app
 
+# Copy aisuite config to home directory
+RUN mkdir -p /root && cp /app/.aisuite.yaml /root/.aisuite.yaml || true
+
 # Your entrypoint
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

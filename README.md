@@ -56,7 +56,7 @@ This repo includes a Docker setup that runs **Postgres + the API in one containe
 
 ## Environment variables
 
-The app **reads only `DATABASE_URL`** at startup.
+The app reads `DATABASE_URL` and supports generic LLM configuration for OpenAI-compatible servers.
 
 * The container’s entrypoint sets a sane default for local dev:
 
@@ -66,6 +66,30 @@ The app **reads only `DATABASE_URL`** at startup.
 * To use Tavily:
 
   * Provide `TAVILY_API_KEY` (via `.env` or `-e`).
+
+LLM configuration (generic, CPU-friendly options):
+
+```
+# Choose a provider (informational): ollama | lmstudio | openai
+LLM_PROVIDER=ollama
+
+# Base URL for an OpenAI-compatible server
+# - Ollama:   http://localhost:11434/v1
+# - LMStudio: http://localhost:1234/v1
+LLM_BASE_URL=http://localhost:11434/v1
+
+# API key (string; can be a dummy for local servers)
+LLM_API_KEY=ollama
+
+# Default model identifier
+# - Examples (CPU quantized):
+#   qwen2.5:7b-instruct-q4_K_M
+#   llama3.1:8b-instruct-q4_K_M
+# - For OpenAI (optional): openai:gpt-4.1-mini
+LLM_MODEL=qwen2.5:7b-instruct-q4_K_M
+```
+
+Backward compatibility: if `LLM_BASE_URL`/`LLM_API_KEY` are not set, `OPENAI_BASE_URL`/`OPENAI_API_KEY` are used if present.
 
 Optional (if you want to override defaults done by the entrypoint):
 
@@ -85,8 +109,16 @@ docker build -t fastapi-postgres-service .
 
 ### 2) Run (foreground)
 
+**IMPORTANT**: Add `--add-host=host.docker.internal:host-gateway` to allow the container to reach Ollama on your host machine.
+
 ```bash
-docker run --rm -it  -p 8000:8000  -p 5432:5432  --name fpsvc  --env-file .env  fastapi-postgres-service
+docker run --rm -it \
+  --add-host=host.docker.internal:host-gateway \
+  -p 8000:8000 \
+  -p 5432:5432 \
+  --name fpsvc \
+  --env-file .env \
+  fastapi-postgres-service
 ```
 
 You should see logs like:
@@ -112,9 +144,15 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 ### Kick off a run
 
 ```bash
+# Using default model from env
 curl -X POST http://localhost:8000/generate_report \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Large Language Models for scientific discovery", "model":"openai:gpt-4o"}'
+  -d '{"prompt": "Large Language Models for scientific discovery"}'
+
+# Overriding model per request (works with local OpenAI-compatible servers)
+curl -X POST http://localhost:8000/generate_report \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Large Language Models for scientific discovery", "model":"qwen2.5:7b-instruct-q4_K_M"}'
 # -> {"task_id": "UUID..."}
 ```
 
